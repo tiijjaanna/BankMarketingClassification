@@ -1,217 +1,291 @@
-from pathlib import Path
-
 import joblib
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
-from sklearn.metrics import accuracy_score, classification_report, f1_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier
+from sklearn.metrics import (
+    accuracy_score, f1_score, fbeta_score, precision_score, recall_score,
+    roc_auc_score, average_precision_score,
+)
 
-from data_preparation import get_prepared_data
-
-BASE_DIR = Path(__file__).resolve().parents[1]
-
-DATA_PATH = BASE_DIR / "data" / "bank-additional-full.csv"
-MODEL_DIR = BASE_DIR / "models"
-RESULTS_DIR = BASE_DIR / "results"
-FIGURES_DIR = RESULTS_DIR / "figures"
+from data_preparation import (
+    DATA_PATH, MODEL_DIR, RESULTS_DIR, FIGURES_DIR,
+    CATEGORICAL_FEATURES, NUMERIC_FEATURES, get_data_and_preprocessor,
+)
+from model_training import build_pipeline, get_models
 
 MODEL_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
-# Koliko top atributa zadrzavamo u reduktivnom modelu
-TOP_N = 10
+# Broj raznih "top-N" podskupova koje poredimo sa punim skupom atributa.
+TOP_N_VALUES = [5, 10, 15]
 
 
-def get_feature_importance(model: ImbPipeline, feature_names: list) -> pd.DataFrame:
-    # XGBoost cuva feature importance u named_steps["classifier"]
-    classifier = model.named_steps["classifier"]
-    importances = classifier.feature_importances_
+def load_best_model():
+    """Učitavanje najboljeg modela iz više mogućih lokacija (tuning ima prioritet)."""
+    model_paths = [
+        MODEL_DIR / "best_tuned_model.joblib",
+        MODEL_DIR / "best_model.joblib",
+        MODEL_DIR / "final_model.joblib",
+    ]
+    for path in model_paths:
+        if path.exists():
+            print(f"Učitavanje modela: {path}")
+            return joblib.load(path)
 
-    importance_df = pd.DataFrame({
+    model_files = list(MODEL_DIR.glob("best_model*.joblib"))
+    if model_files:
+        print(f"Učitavanje modela: {model_files[0]}")
+        return joblib.load(model_files[0])
+
+    print("⚠️  Nijedan model nije pronađen!")
+    return None
+
+
+def encoded_to_raw(feature):
+    """
+    Konvertuje enkodirani naziv atributa u originalni naziv kolone.
+    Primer: categorical__job_admin. -> job ; numeric__age -> age
+    """
+    if feature.startswith("numeric__"):
+        return feature.replace("numeric__", "")
+    if feature.startswith("categorical__"):
+        feature = feature.replace("categorical__", "")
+
+    for prefix in CATEGORICAL_FEATURES:
+        if feature.startswith(prefix + "_"):
+            return prefix
+
+    return feature
+
+
+def get_feature_importance(model):
+    """
+    Izvlači feature importance iz modela.
+    - Stabla/ansambli (DecisionTree, RandomForest, GradientBoosting): Gini importance.
+    - Logistic Regression: apsolutna vrednost koeficijenata.
+    Radi i sa golim klasifikatorom i sa celim ImbPipeline-om (preprocessor+smote+classifier).
+    """
+    if hasattr(model, "named_steps"):
+        preprocessor = model.named_steps["preprocessor"]
+        classifier = model.named_steps["classifier"]
+    else:
+        raise ValueError(
+            "Model mora biti ceo Pipeline (sa korakom 'preprocessor' i 'classifier') "
+            "da bi se feature importance moglo povezati sa originalnim atributima."
+        )
+
+    feature_names = preprocessor.get_feature_names_out()
+
+    if hasattr(classifier, "feature_importances_"):
+        importances = classifier.feature_importances_
+    elif hasattr(classifier, "coef_"):
+        importances = abs(classifier.coef_[0])
+    else:
+        raise ValueError("Ovaj model nema direktno dostupnu feature importance vrednost.")
+
+    return pd.DataFrame({
         "feature": feature_names,
-        "importance": importances
-    }).sort_values("importance", ascending=False).reset_index(drop=True)
-
-    return importance_df
+        "importance": importances,
+    }).sort_values(by="importance", ascending=False).reset_index(drop=True)
 
 
-def plot_feature_importance(importance_df: pd.DataFrame, title: str, filename: str):
-    top = importance_df.head(20)
+def plot_feature_importance(importance_df, model_name, top_n=20):
+    """Prikaz feature importance (top_n enkodiranih atributa)."""
+    top = importance_df.head(top_n).copy()
+    top["feature_display"] = top["feature"].apply(
+        lambda x: x.replace("categorical__", "").replace("numeric__", "").replace("_", " ").title()
+    )
 
     plt.figure(figsize=(10, 8))
-    plt.barh(top["feature"][::-1], top["importance"][::-1],
-             color="#2563EB", edgecolor="white", linewidth=1.2)
-    plt.xlabel("Feature Importance (Gain)", fontweight="bold")
-    plt.title(title, fontsize=14, fontweight="bold")
-    plt.grid(axis="x", alpha=0.3)
+    plt.barh(top["feature_display"][::-1], top["importance"][::-1])
+    plt.title(f"Feature importance ({model_name}) - Top {top_n} atributa")
+    plt.xlabel("Importance")
     plt.tight_layout()
-    plt.savefig(FIGURES_DIR / filename, dpi=150)
+    plt.savefig(FIGURES_DIR / "feature_importance.png", dpi=150)
     plt.close()
-    print(f"Sacuvano: {filename}")
+
+    print(f"\nTop {top_n} atributa po feature importance ({model_name}):")
+    for i, row in top.iterrows():
+        raw = encoded_to_raw(row["feature"])
+        print(f"  {i + 1}. {row['feature']} -> {raw} ({row['importance']:.4f})")
 
 
-def train_reduced_model(X_train, X_test, y_train, y_test,
-                        top_features: list) -> dict:
-    print(f"\n{'='*60}")
-    print(f"TRENIRANJE MODELA SA TOP {TOP_N} ATRIBUTA")
-    print(f"{'='*60}")
-    print(f"Odabrani atributi: {top_features}\n")
+def get_top_raw_features(importance_df, n):
+    """
+    Vraća listu od n originalnih (sirovih) naziva kolona, sortiranih po
+    najvecem pojedinacnom importance-u medju njihovim enkodiranim kategorijama.
+    Npr. ako su 'poutcome_success' i 'poutcome_failure' oba visoko rangirani,
+    'poutcome' se u finalnu listu ubraja samo jednom.
+    """
+    raw_features = []
+    for _, row in importance_df.iterrows():
+        raw = encoded_to_raw(row["feature"])
+        if raw not in raw_features:
+            raw_features.append(raw)
+        if len(raw_features) >= n:
+            break
+    return raw_features
 
-    X_train_red = X_train[top_features]
-    X_test_red = X_test[top_features]
 
-    # Koristimo iste hiperparametre kao podesen model
-    try:
-        tuned = joblib.load(MODEL_DIR / "tuned_model.joblib")
-        xgb_params = tuned.named_steps["classifier"].get_params()
-    except FileNotFoundError:
-        xgb_params = {"n_estimators": 100, "max_depth": 5,
-                      "learning_rate": 0.1, "subsample": 0.8}
-
-    pipeline_red = ImbPipeline(steps=[
-        ("scaler", StandardScaler()),
-        ("smote", SMOTE(random_state=42)),
-        ("classifier", XGBClassifier(
-            **{k: v for k, v in xgb_params.items()
-               if k in ["n_estimators", "max_depth", "learning_rate", "subsample"]},
-            random_state=42, eval_metric="logloss", verbosity=0
-        )),
-    ])
-
-    pipeline_red.fit(X_train_red, y_train)
-    y_pred_red = pipeline_red.predict(X_test_red)
-
-    results = {
-        "accuracy": accuracy_score(y_test, y_pred_red),
-        "f1_macro": f1_score(y_test, y_pred_red, average="macro"),
-        "f1_yes": f1_score(y_test, y_pred_red, pos_label=1),
+def evaluate_classifier(model, X, y):
+    y_pred = model.predict(X)
+    y_prob = model.predict_proba(X)[:, 1]
+    return {
+        "accuracy": accuracy_score(y, y_pred),
+        "precision": precision_score(y, y_pred, zero_division=0),
+        "recall": recall_score(y, y_pred),
+        "f1_yes": f1_score(y, y_pred, pos_label=1),
+        "f2_yes": fbeta_score(y, y_pred, beta=2, pos_label=1, zero_division=0),
+        "roc_auc": roc_auc_score(y, y_prob),
+        "pr_auc": average_precision_score(y, y_prob),
     }
 
-    print("Rezultati modela sa redukovanim atributima:")
-    print(f"  Accuracy:   {results['accuracy']:.4f}")
-    print(f"  Macro F1:   {results['f1_macro']:.4f}")
-    print(f"  F1 (yes):   {results['f1_yes']:.4f}")
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred_red,
-                                target_names=["no", "yes"], zero_division=0))
 
-    joblib.dump(pipeline_red, MODEL_DIR / "reduced_model.joblib")
-    return results
+def train_and_evaluate_subset(classifier_template, selected_features, X_train, y_train, X_test, y_test, label):
+    """
+    Trenira SVEZ pipeline (preprocessor+SMOTE+classifier) na zadatom podskupu
+    originalnih (sirovih) atributa i evaluira na test skupu. Koristi se isti
+    tip klasifikatora (iste hiperparametre) kao najbolji model, da bi
+    poređenje "svi vs top-N" bilo fer (razlika dolazi samo od atributa, ne
+    od drugog algoritma).
+    """
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder
+
+    cat_subset = [c for c in CATEGORICAL_FEATURES if c in selected_features]
+    num_subset = [c for c in NUMERIC_FEATURES if c in selected_features]
+
+    subset_preprocessor = ColumnTransformer(transformers=[
+        ("categorical", OneHotEncoder(handle_unknown="ignore"), cat_subset),
+        ("numeric", "passthrough", num_subset),
+    ])
+
+    pipeline = ImbPipeline(steps=[
+        ("preprocessor", subset_preprocessor),
+        ("smote", SMOTE(random_state=42)),
+        ("classifier", classifier_template),
+    ])
+
+    cols = cat_subset + num_subset
+    pipeline.fit(X_train[cols], y_train)
+    metrics = evaluate_classifier(pipeline, X_test[cols], y_test)
+    metrics["label"] = label
+    metrics["n_features"] = len(cols)
+    metrics["features"] = ", ".join(cols)
+    return metrics
 
 
-def compare_full_vs_reduced(full_results: dict, reduced_results: dict,
-                             feature_names: list):
-    print(f"\n{'='*60}")
-    print("POREDJENJE: SVI ATRIBUTI vs TOP ATRIBUTI")
-    print(f"{'='*60}")
+def compare_full_vs_topn(best_model_name, importance_df, X_train, y_train, X_test, y_test):
+    """
+    Poredi performanse modela treniranog na SVIM atributima sa performansama
+    istog tipa modela treniranog na top-5, top-10, top-15 atributima (po
+    feature importance). Klasifikator se ponovo kreira "od nule" sa istim
+    hiperparametrima kao polazni model.
+    """
+    print("\n" + "=" * 60)
+    print("POREĐENJE: SVI ATRIBUTI vs. TOP-N ATRIBUTA")
+    print("=" * 60)
 
-    comparison = pd.DataFrame({
-        "Metrika": ["Accuracy", "Macro F1", "F1 (yes)"],
-        f"Svi atributi ({len(feature_names)})": [
-            full_results["accuracy"],
-            full_results["f1_macro"],
-            full_results["f1_yes"],
-        ],
-        f"Top {TOP_N} atributa": [
-            reduced_results["accuracy"],
-            reduced_results["f1_macro"],
-            reduced_results["f1_yes"],
-        ],
-    })
+    classifier_template = get_models()[best_model_name]
+    all_features = CATEGORICAL_FEATURES + NUMERIC_FEATURES
 
-    print(comparison.to_string(index=False))
+    rows = []
 
-    # Grafik poredjenja
-    metrics = ["Accuracy", "Macro F1", "F1 (yes)"]
-    full_vals = [full_results["accuracy"], full_results["f1_macro"], full_results["f1_yes"]]
-    red_vals = [reduced_results["accuracy"], reduced_results["f1_macro"], reduced_results["f1_yes"]]
+    full_metrics = train_and_evaluate_subset(
+        classifier_template, all_features, X_train, y_train, X_test, y_test,
+        label="Svi atributi"
+    )
+    rows.append(full_metrics)
+    print(f"\nSvi atributi ({full_metrics['n_features']}): "
+          f"F2={full_metrics['f2_yes']:.4f} F1={full_metrics['f1_yes']:.4f} "
+          f"Recall={full_metrics['recall']:.4f} Precision={full_metrics['precision']:.4f}")
 
-    x = np.arange(len(metrics))
-    width = 0.35
+    for n in TOP_N_VALUES:
+        top_features = get_top_raw_features(importance_df, n)
+        metrics = train_and_evaluate_subset(
+            classifier_template, top_features, X_train, y_train, X_test, y_test,
+            label=f"Top {n}"
+        )
+        rows.append(metrics)
+        print(f"\nTop {n} ({metrics['n_features']} sirovih atributa: {metrics['features']}): "
+              f"F2={metrics['f2_yes']:.4f} F1={metrics['f1_yes']:.4f} "
+              f"Recall={metrics['recall']:.4f} Precision={metrics['precision']:.4f}")
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    bars1 = ax.bar(x - width/2, full_vals, width, label=f"Svi atributi ({len(feature_names)})",
-                   color="#2563EB", edgecolor="white")
-    bars2 = ax.bar(x + width/2, red_vals, width, label=f"Top {TOP_N} atributa",
-                   color="#F59E0B", edgecolor="white")
+    comparison_df = pd.DataFrame(rows)
+    comparison_df.to_csv(RESULTS_DIR / "feature_selection_comparison.csv", index=False)
+    print(f"\n✅ Poređenje sačuvano u: {RESULTS_DIR / 'feature_selection_comparison.csv'}")
 
-    for bar in bars1:
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005,
-                f"{bar.get_height():.4f}", ha="center", va="bottom", fontsize=9)
-    for bar in bars2:
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005,
-                f"{bar.get_height():.4f}", ha="center", va="bottom", fontsize=9)
+    plot_comparison(comparison_df, best_model_name)
+    return comparison_df
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(metrics)
-    ax.set_ylim(0, 1.1)
-    ax.set_title("Poredjenje: svi vs. najbitniji atributi", fontweight="bold")
+
+def plot_comparison(comparison_df, model_name):
+    """Bar plot: F2, F1, Recall, Precision za 'Svi atributi' i svaki Top-N."""
+    metrics_to_plot = ["f2_yes", "f1_yes", "recall", "precision"]
+    labels = ["F2", "F1", "Recall", "Precision"]
+
+    x = range(len(comparison_df))
+    width = 0.2
+    fig, ax = plt.subplots(figsize=(11, 6))
+    for i, (metric, label) in enumerate(zip(metrics_to_plot, labels)):
+        offset = (i - len(metrics_to_plot) / 2) * width
+        ax.bar([p + offset for p in x], comparison_df[metric], width, label=label)
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(comparison_df["label"], rotation=0)
+    ax.set_ylabel("Vrednost metrike")
+    ax.set_title(f"Poređenje: svi atributi vs. top-N atributa ({model_name})")
     ax.legend()
-    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, 1.0)
     plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "full_vs_reduced.png", dpi=150)
+    plt.savefig(FIGURES_DIR / "feature_selection_comparison.png", dpi=150)
     plt.close()
-    print("\nSacuvano: full_vs_reduced.png")
 
-    comparison.to_csv(RESULTS_DIR / "full_vs_reduced.csv", index=False)
+
+def main():
+    print("=" * 60)
+    print("FAZA 6: SELEKCIJA NAJZNAČAJNIJIH ATRIBUTA")
+    print("=" * 60)
+
+    splits_path = MODEL_DIR / "data_splits.joblib"
+    if not splits_path.exists():
+        print("❌ data_splits.joblib nije pronađen! Prvo pokrenite model_training.py")
+        return
+
+    X_train, X_val, X_test, y_train, y_val, y_test = joblib.load(splits_path)
+
+    model = load_best_model()
+    if model is None:
+        print("❌ Nema modela za analizu. Prvo pokrenite model_training.py")
+        return
+
+    best_model_name_path = MODEL_DIR / "best_tuned_model_name.txt"
+    if not best_model_name_path.exists():
+        best_model_name_path = MODEL_DIR / "best_model_name.txt"
+    if best_model_name_path.exists():
+        best_model_name = best_model_name_path.read_text(encoding="utf-8").strip()
+    else:
+        print("⚠️  Ime najboljeg modela nije pronađeno, podrazumevam 'Logistic Regression'.")
+        best_model_name = "Logistic Regression"
+
+    print(f"Najbolji model: {best_model_name}")
+
+    importance_df = get_feature_importance(model)
+    importance_df.to_csv(RESULTS_DIR / "feature_importance.csv", index=False)
+    print(f"\n✅ Feature importance sačuvan u: {RESULTS_DIR / 'feature_importance.csv'}")
+
+    plot_feature_importance(importance_df, best_model_name, top_n=20)
+
+    compare_full_vs_topn(best_model_name, importance_df, X_train, y_train, X_test, y_test)
+
+    print("\n" + "=" * 60)
+    print("SELEKCIJA ATRIBUTA ZAVRŠENA")
+    print("=" * 60)
+    print(f"📁 Rezultati sačuvani u: {RESULTS_DIR}")
+    print(f"📊 Grafikoni sačuvani u: {FIGURES_DIR}")
 
 
 if __name__ == "__main__":
-    print("Ucitavanje podataka...")
-    X, y = get_prepared_data(DATA_PATH)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    # Ucitavamo podesen model (ili best_model ako tuning nije pokrenut)
-    try:
-        best_model = joblib.load(MODEL_DIR / "tuned_model.joblib")
-        print("Ucitan podesen model (tuned_model.joblib)")
-    except FileNotFoundError:
-        best_model = joblib.load(MODEL_DIR / "best_model.joblib")
-        print("Ucitan najbolji model (best_model.joblib)")
-
-    # Feature importance na svim atributima
-    feature_names = list(X.columns)
-    importance_df = get_feature_importance(best_model, feature_names)
-
-    print("\nTop 10 najbitnijih atributa:")
-    print(importance_df.head(10).to_string(index=False))
-
-    importance_df.to_csv(RESULTS_DIR / "feature_importance.csv", index=False)
-    plot_feature_importance(importance_df,
-                            "Feature Importance – XGBoost (svi atributi)",
-                            "feature_importance_full.png")
-
-    # Rezultati modela sa svim atributima
-    y_pred_full = best_model.predict(X_test)
-    full_results = {
-        "accuracy": accuracy_score(y_test, y_pred_full),
-        "f1_macro": f1_score(y_test, y_pred_full, average="macro"),
-        "f1_yes": f1_score(y_test, y_pred_full, pos_label=1),
-    }
-
-    # Treniranje sa top N atributima
-    top_features = importance_df.head(TOP_N)["feature"].tolist()
-    reduced_results = train_reduced_model(
-        X_train, X_test, y_train, y_test, top_features
-    )
-
-    # Feature importance redukovanog modela
-    reduced_model = joblib.load(MODEL_DIR / "reduced_model.joblib")
-    importance_red = get_feature_importance(reduced_model, top_features)
-    plot_feature_importance(importance_red,
-                            f"Feature Importance – XGBoost (top {TOP_N} atributa)",
-                            "feature_importance_reduced.png")
-
-    # Poredjenje
-    compare_full_vs_reduced(full_results, reduced_results, feature_names)
-
-    print("\nOdabir atributa zavrsen!")
+    main()

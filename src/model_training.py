@@ -5,280 +5,267 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (accuracy_score, classification_report,
-                             confusion_matrix, f1_score, recall_score,
-                             precision_score, roc_auc_score)
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    accuracy_score, classification_report, confusion_matrix, f1_score, fbeta_score,
+    make_scorer, precision_score, recall_score, roc_auc_score, average_precision_score,
+)
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.tree import DecisionTreeClassifier
-from xgboost import XGBClassifier
 
-from data_preparation import get_prepared_data
-
-BASE_DIR = Path(__file__).resolve().parents[1]
-
-DATA_PATH = BASE_DIR / "data" / "bank-additional-full.csv"
-MODEL_DIR = BASE_DIR / "models"
-RESULTS_DIR = BASE_DIR / "results"
-FIGURES_DIR = RESULTS_DIR / "figures"
+from data_preparation import DATA_PATH, MODEL_DIR, RESULTS_DIR, FIGURES_DIR, ECONOMIC_FEATURES, get_data_and_preprocessor
 
 MODEL_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
+# Kriterijum po kome se bira "najbolji" model: F2 za yes klasu (val_f2_yes).
+#
+# F_beta = (1+beta^2) * (Precision*Recall) / (beta^2*Precision + Recall)
+# Za beta=2: F2 = 5 * (P*R) / (4P + R)  -> Recall ima 4x vecu tezinu od
+# Precision-a u formuli. Ovo direktno odrazava temu projekta (predikcija
+# koliko ce banka klijenata "upecati"): propusten klijent koji bi se
+# pretplatio (FN) smatra se skupljom greskom nego suvisan poziv (FP), pa F2
+# nagradjuje modele/parametre koji bolje hvataju pozitivnu klasu, bez da
+# potpuno zanemaruje Precision (kao sto bi cist Recall kriterijum mogao).
+#
+# SANITY-CHECK: kriterijum izbora ostaje F2, ali se uz njega prati i
+# Precision - ako bi neki kandidat imao ekstremno nizak Precision (npr.
+# model koji gotovo uvek predvidja "yes"), to bi bilo vidljivo u
+# MIN_ACCEPTABLE_PRECISION proveri ispod, kako se ne bi nesvesno izabrao
+# poslovno beskoristan model. Na trenutnom skupu od 4 modela ovo se ne
+# aktivira (svi imaju Precision > 0.30), ali ostaje kao zastita za buduce
+# izmene hiperparametara.
+SELECTION_METRIC = "val_f2_yes"
+MIN_ACCEPTABLE_PRECISION = 0.20
 
-def get_models() -> dict:
+# scoring za cross_val_score: F2 favorizuje Recall (beta=2), isti kriterijum
+# kao SELECTION_METRIC.
+F2_SCORER = make_scorer(fbeta_score, beta=2, pos_label=1, zero_division=0)
+
+
+def get_models():
     return {
-        # Logistic Regression – baseline model, brz i interpretabilan.
         # class_weight="balanced" kompenzuje neuravnotezenost klasa (88%/12%)
-        # jer SMOTE primenjujemo samo na trening, LR i dalje moze imati koristi
-        # od eksplicitnog balansiranja tezina klasa
+        # zajedno sa SMOTE-om u pipeline-u - SMOTE balansira podatke,
+        # class_weight dodatno balansira gresku modela.
         "Logistic Regression": LogisticRegression(
-            max_iter=1000,
-            random_state=42,
+            max_iter=2000, solver="liblinear", random_state=42,
             class_weight="balanced"
         ),
-
-        # Decision Tree – interpretabilan, lako vizualizabilan.
-        # max_depth=10 sprecava overfitting (bez ogranicenja stablo moze
-        # da zapamti svaki primer iz trening skupa)
-        # class_weight="balanced" – isto kao kod LR
         "Decision Tree": DecisionTreeClassifier(
-            random_state=42,
-            max_depth=10,
+            max_depth=10, random_state=42,
             class_weight="balanced"
         ),
-
-        # Random Forest – kombinuje vise stabala (n_estimators=100).
-        # Svako stablo se trenira na random poduzorku podataka i atributa.
-        # Otporan na overfitting, daje feature importance.
-        # n_jobs=-1 – koristi sva dostupna CPU jezgra za brzinu
         "Random Forest": RandomForestClassifier(
-            n_estimators=100,
-            random_state=42,
-            class_weight="balanced",
-            n_jobs=-1
+            n_estimators=100, random_state=42, n_jobs=-1,
+            class_weight="balanced"
         ),
-
-        # XGBoost – trenutno jedan od najjacih algoritama za tabelarne podatke.
-        # scale_pos_weight kompenzuje neuravnotezenost:
-        # neg/pos = 34806/4598 ≈ 7.57 → daje veci znacaj manjinskoj klasi
-        # eval_metric="logloss" – metrika za pracenje tokom treninga
-        "XGBoost": XGBClassifier(
-            n_estimators=100,
-            random_state=42,
-            scale_pos_weight=34806 / 4598,
-            eval_metric="logloss",
-            verbosity=0
+        # GradientBoostingClassifier u sklearn-u NE PODRZAVA class_weight
+        # parametar, pa se za njega oslanjamo iskljucivo na SMOTE.
+        "Gradient Boosting": GradientBoostingClassifier(
+            n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42
         ),
     }
 
 
 def split_data(X, y):
-    # Delimo na 3 skupa: 70% trening, 15% validacioni, 15% test
-    # stratify=y cuva proporciju klasa (88%/12%) u svakom skupu
-    #
-    # Zasto 3 skupa?
-    # - trening: model uci na ovim podacima
-    # - validacioni: biramo koji model je najbolji (bez "trosenja" test skupa)
-    # - test: koristimo JEDNOM na kraju za finalnu ocenu
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.30, random_state=42, stratify=y
-    )
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.50, random_state=42, stratify=y_temp
-    )
-
-    print(f"Trening skup:     {X_train.shape[0]} uzoraka")
-    print(f"Validacioni skup: {X_val.shape[0]} uzoraka")
-    print(f"Test skup:        {X_test.shape[0]} uzoraka")
-    print(f"\nRaspodela y_train:\n{y_train.value_counts()}")
-    print(f"\nRaspodela y_val:\n{y_val.value_counts()}")
-
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.30, random_state=42, stratify=y)
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.50, random_state=42, stratify=y_temp)
+    print("\nDimenzije skupova")
+    print("X_train:", X_train.shape)
+    print("X_val:", X_val.shape)
+    print("X_test:", X_test.shape)
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
-def build_pipeline(classifier) -> ImbPipeline:
-    # Pipeline redosled:
-    # 1. StandardScaler – normalizuje sve numericke vrednosti na isti opseg
-    #    (bitno za Logistic Regression i Distance-based modele)
-    # 2. SMOTE – sinteticki generise uzorke manjinske klase (yes=11%)
-    #    SMOTE se primenjuje SAMO na trening podacima
-    #    (zato koristimo ImbPipeline iz imbalanced-learn, a ne sklearn Pipeline)
-    # 3. Classifier – trenira model na balansiranim podacima
+def build_pipeline(preprocessor, classifier):
     return ImbPipeline(steps=[
-        ("scaler", StandardScaler()),
+        ("preprocessor", preprocessor),
         ("smote", SMOTE(random_state=42)),
         ("classifier", classifier),
     ])
 
 
-def train_and_validate(X_train, X_val, y_train, y_val) -> tuple[dict, dict]:
-    models = get_models()
-    trained_pipelines = {}
-    val_results = {}
-
-    for name, classifier in models.items():
-        print("\n" + "=" * 55)
-        print(f"  {name}")
-        print("=" * 55)
-
-        pipeline = build_pipeline(classifier)
-
-        # Cross-validacija na trening skupu (5 foldova)
-        # Daje stabilniju procenu od jednog trening/val split-a
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        cv_scores = cross_val_score(
-            pipeline, X_train, y_train,
-            cv=cv, scoring="f1_macro"
-        )
-        print(f"  CV Macro F1 (trening): {cv_scores.mean():.4f} "
-              f"(+/- {cv_scores.std():.4f})")
-
-        # Treniranje na celom trening skupu
-        pipeline.fit(X_train, y_train)
-        trained_pipelines[name] = pipeline
-
-        # Evaluacija na VALIDACIONOM skupu
-        y_pred = pipeline.predict(X_val)
-        y_prob = pipeline.predict_proba(X_val)[:, 1]
-
-        acc      = accuracy_score(y_val, y_pred)
-        prec     = precision_score(y_val, y_pred, zero_division=0)
-        rec      = recall_score(y_val, y_pred)
-        f1_mac   = f1_score(y_val, y_pred, average="macro")
-        f1_yes   = f1_score(y_val, y_pred, pos_label=1)
-        roc      = roc_auc_score(y_val, y_prob)
-
-        print(f"\n  Rezultati na VALIDACIONOM skupu:")
-        print(f"  Accuracy:      {acc:.4f}")
-        print(f"  Precision:     {prec:.4f}")
-        print(f"  Recall:        {rec:.4f}")
-        print(f"  Macro F1:      {f1_mac:.4f}")
-        print(f"  F1 (yes):      {f1_yes:.4f}")
-        print(f"  ROC-AUC:       {roc:.4f}")
-
-        print(f"\n  Classification Report (validacioni skup):")
-        print(classification_report(y_val, y_pred,
-                                    target_names=["no", "yes"],
-                                    zero_division=0))
-
-        print(f"  Confusion Matrix (validacioni skup):")
-        print(confusion_matrix(y_val, y_pred))
-
-        val_results[name] = {
-            "accuracy":  round(acc, 4),
-            "precision": round(prec, 4),
-            "recall":    round(rec, 4),
-            "f1_macro":  round(f1_mac, 4),
-            "f1_yes":    round(f1_yes, 4),
-            "roc_auc":   round(roc, 4),
-            "cv_f1_macro": round(cv_scores.mean(), 4),
-        }
-
-    return trained_pipelines, val_results
+def evaluate_model(model, X, y):
+    y_pred = model.predict(X)
+    y_prob = model.predict_proba(X)[:, 1]
+    return {
+        "accuracy": accuracy_score(y, y_pred),
+        "precision": precision_score(y, y_pred, zero_division=0),
+        "recall": recall_score(y, y_pred),
+        "f1_yes": f1_score(y, y_pred, pos_label=1),
+        "f2_yes": fbeta_score(y, y_pred, beta=2, pos_label=1, zero_division=0),
+        "roc_auc": roc_auc_score(y, y_prob),
+        # PR-AUC (average precision) je informativniji od ROC-AUC kada je
+        # pozitivna klasa retka (~11%) - baseline za PR-AUC je udeo
+        # pozitivne klase, za razliku od ROC-AUC ciji je baseline uvek 0.5.
+        "pr_auc": average_precision_score(y, y_prob),
+        "confusion_matrix": confusion_matrix(y, y_pred),
+        "classification_report": classification_report(y, y_pred, target_names=["no", "yes"], zero_division=0),
+    }
 
 
-def print_summary(val_results: dict):
-    print("\n" + "=" * 55)
-    print("REZIME – VALIDACIONI SKUP (sortirano po Macro F1)")
-    print("=" * 55)
-    print(f"{'Model':<22} {'CV F1':>8} {'Val F1':>8} {'F1 yes':>8} {'ROC':>8} {'Recall':>8}")
-    print("-" * 55)
+def train_models(X_train, X_val, y_train, y_val, preprocessor, experiment_name):
+    trained_models = {}
+    rows = []
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    sorted_results = sorted(val_results.items(),
-                            key=lambda x: x[1]["f1_macro"], reverse=True)
-    for i, (name, r) in enumerate(sorted_results):
-        medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "   "
-        print(f"{medal} {name:<19} {r['cv_f1_macro']:>8.4f} {r['f1_macro']:>8.4f} "
-              f"{r['f1_yes']:>8.4f} {r['roc_auc']:>8.4f} {r['recall']:>8.4f}")
+    for model_name, classifier in get_models().items():
+        print("\n" + "=" * 60)
+        print(model_name)
+        print("=" * 60)
+        model = build_pipeline(preprocessor, classifier)
 
-    print("\nNajbolji model prema Macro F1:", sorted_results[0][0])
+        # CV scoring prati isti kriterijum kao i finalni izbor modela (F2 za
+        # yes klasu).
+        cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring=F2_SCORER, n_jobs=-1)
+        model.fit(X_train, y_train)
+        trained_models[model_name] = model
+        metrics = evaluate_model(model, X_val, y_val)
+
+        print("CV F2 (yes):", round(cv_scores.mean(), 4))
+        print("Validation Accuracy:", round(metrics["accuracy"], 4))
+        print("Validation Precision:", round(metrics["precision"], 4))
+        print("Validation Recall:", round(metrics["recall"], 4))
+        print("Validation F1 (yes):", round(metrics["f1_yes"], 4))
+        print("Validation F2 (yes):", round(metrics["f2_yes"], 4))
+        print("Validation ROC-AUC:", round(metrics["roc_auc"], 4))
+        print("Validation PR-AUC:", round(metrics["pr_auc"], 4))
+        if metrics["precision"] < MIN_ACCEPTABLE_PRECISION:
+            print(f"⚠️  UPOZORENJE: Precision ({metrics['precision']:.4f}) je ispod "
+                  f"prihvatljivog minimuma ({MIN_ACCEPTABLE_PRECISION}). Model moze biti "
+                  f"poslovno beskoristan uprkos visokom F2/Recall-u.")
+        print("\nClassification report")
+        print(metrics["classification_report"])
+        print("\nConfusion matrix")
+        print(metrics["confusion_matrix"])
+
+        rows.append({
+            "experiment": experiment_name,
+            "model": model_name,
+            "cv_f2_yes": cv_scores.mean(),
+            "val_accuracy": metrics["accuracy"],
+            "val_precision": metrics["precision"],
+            "val_recall": metrics["recall"],
+            "val_f1_yes": metrics["f1_yes"],
+            "val_f2_yes": metrics["f2_yes"],
+            "val_roc_auc": metrics["roc_auc"],
+            "val_pr_auc": metrics["pr_auc"],
+        })
+
+    results_df = pd.DataFrame(rows)
+    results_df.to_csv(RESULTS_DIR / f"{experiment_name}_validation_results.csv", index=False)
+    print(f"\nPoredjenje modela (rangirano po {SELECTION_METRIC})")
+    print(results_df.sort_values(by=SELECTION_METRIC, ascending=False))
+    return trained_models, results_df
 
 
-def plot_comparison(val_results: dict):
-    df = pd.DataFrame(val_results).T.reset_index()
-    df.columns = ["model"] + list(df.columns[1:])
+def plot_results(results_df, filename):
+    """Bar plot koji prikazuje SVE kljucne metrike jedna pored druge (ne
+    samo F2), da bi se izbor modela mogao 'izbalansirano' sagledati."""
+    sorted_df = results_df.sort_values(by=SELECTION_METRIC, ascending=False)
+    metrics_to_plot = ["val_accuracy", "val_precision", "val_recall", "val_f1_yes", "val_f2_yes"]
+    labels = ["Accuracy", "Precision", "Recall", "F1", "F2"]
 
-    metrics = ["cv_f1_macro", "f1_macro", "f1_yes", "roc_auc"]
-    labels  = ["CV Macro F1", "Val Macro F1", "Val F1 (yes)", "ROC-AUC"]
-    colors  = ["#2563EB", "#F59E0B", "#10B981", "#EF4444"]
+    x = range(len(sorted_df))
+    width = 0.15
+    fig, ax = plt.subplots(figsize=(12, 6))
+    for i, (metric, label) in enumerate(zip(metrics_to_plot, labels)):
+        offset = (i - len(metrics_to_plot) / 2) * width
+        ax.bar([p + offset for p in x], sorted_df[metric], width, label=label)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-    axes = axes.flatten()
-
-    for i, (metric, label, color) in enumerate(zip(metrics, labels, colors)):
-        vals = df[metric].astype(float)
-        bars = axes[i].bar(df["model"], vals, color=color,
-                           edgecolor="white", linewidth=1.5)
-        for bar, val in zip(bars, vals):
-            axes[i].text(bar.get_x() + bar.get_width() / 2,
-                         bar.get_height() + 0.005,
-                         f"{val:.4f}", ha="center", va="bottom",
-                         fontsize=9, fontweight="bold")
-        axes[i].set_title(label, fontweight="bold")
-        axes[i].set_ylim(0, 1.1)
-        axes[i].set_xticklabels(df["model"], rotation=15, ha="right")
-        axes[i].grid(axis="y", alpha=0.3)
-
-    plt.suptitle("Poredjenje modela – Validacioni skup",
-                 fontsize=14, fontweight="bold")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(sorted_df["model"], rotation=15)
+    ax.set_ylabel("Vrednost metrike")
+    ax.set_title("Poredjenje modela - sve metrike (rangirano po F2)")
+    ax.legend(loc="upper right", ncol=5, fontsize=8)
+    ax.set_ylim(0, 1.05)
     plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "model_comparison_val.png", dpi=150)
+    plt.savefig(FIGURES_DIR / filename, dpi=150)
     plt.close()
-    print("\nSacuvano: model_comparison_val.png")
 
 
-def save_models(trained_pipelines: dict, val_results: dict):
-    # Cuvamo sve modele
-    for name, pipeline in trained_pipelines.items():
-        fname = name.lower().replace(" ", "_")
-        path = MODEL_DIR / f"{fname}.joblib"
-        joblib.dump(pipeline, path)
+def save_best_model(trained_models, results_df, suffix=""):
+    # Biramo model po F2 (yes) - vidi obrazlozenje uz SELECTION_METRIC gore.
+    best_row = results_df.sort_values(by=SELECTION_METRIC, ascending=False).iloc[0]
+    best_name = best_row["model"]
+    best_model = trained_models[best_name]
+    model_path = MODEL_DIR / (f"best_model_{suffix}.joblib" if suffix else "best_model.joblib")
+    name_path = MODEL_DIR / (f"best_model_name_{suffix}.txt" if suffix else "best_model_name.txt")
+    joblib.dump(best_model, model_path)
+    name_path.write_text(best_name, encoding="utf-8")
 
-    # Cuvamo najbolji model prema validacionom F1
-    best_name = max(val_results, key=lambda x: val_results[x]["f1_macro"])
-    best_pipeline = trained_pipelines[best_name]
-    joblib.dump(best_pipeline, MODEL_DIR / "best_model.joblib")
+    print("\nNajbolji model:", best_name)
+    print(f"Validation F2 (yes): {best_row['val_f2_yes']:.4f}")
+    print(f"Validation F1 (yes): {best_row['val_f1_yes']:.4f}")
+    print(f"Validation Recall: {best_row['val_recall']:.4f}")
+    print(f"Validation Precision: {best_row['val_precision']:.4f}")
+    print(f"Validation Accuracy: {best_row['val_accuracy']:.4f}")
+    if best_row["val_precision"] < MIN_ACCEPTABLE_PRECISION:
+        print(f"⚠️  UPOZORENJE: izabrani model ima Precision ispod {MIN_ACCEPTABLE_PRECISION} - "
+              f"proveriti da li je izbor poslovno opravdan pre finalne upotrebe.")
+    print("Sacuvan kao:", model_path)
+    return best_name, best_model
 
-    print(f"\nNajbolji model: {best_name}")
-    print(f"Sacuvan kao: models/best_model.joblib")
-    return best_name
+
+def run_experiment(experiment_name, selected_features=None):
+    print("\n" + "#" * 70)
+    print("EKSPERIMENT:", experiment_name)
+    print("#" * 70)
+    X, y, preprocessor, categorical_features, numeric_features = get_data_and_preprocessor(DATA_PATH, selected_features=selected_features)
+    print("\nKategorijski atributi:")
+    print(categorical_features)
+    print("\nNumericki atributi:")
+    print(numeric_features)
+    X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y)
+    trained_models, results_df = train_models(X_train, X_val, y_train, y_val, preprocessor, experiment_name)
+    plot_results(results_df, f"{experiment_name}_model_comparison.png")
+    save_best_model(trained_models, results_df, suffix=experiment_name)
+    return {
+        "X_train": X_train, "X_val": X_val, "X_test": X_test,
+        "y_train": y_train, "y_val": y_val, "y_test": y_test,
+        "trained_models": trained_models, "results_df": results_df,
+    }
+
+
+def get_trained_models():
+    """Vraća sve istrenirane modele ako postoje"""
+    models_path = MODEL_DIR / "all_models.joblib"
+    if models_path.exists():
+        return joblib.load(models_path)
+    return None
+
+
+def get_best_model():
+    """Vraća najbolji model"""
+    for name in ["best_tuned_model.joblib", "best_model.joblib", "final_model.joblib"]:
+        path = MODEL_DIR / name
+        if path.exists():
+            return joblib.load(path)
+    return None
 
 
 if __name__ == "__main__":
-    print("Ucitavanje i priprema podataka...")
-    X, y = get_prepared_data(DATA_PATH)
-    print(f"Oblik X: {X.shape} | Raspodela y: {dict(y.value_counts())}")
+    # Glavni eksperiment: svi atributi osim duration (i redundantnih
+    # ekonomskih atributa, uklonjenih unutar get_data_and_preprocessor).
+    all_exp = run_experiment("all_features")
 
-    X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y)
+    # Cuvamo splitove iz glavnog eksperimenta za tuning/evaluation.
+    joblib.dump((all_exp["X_train"], all_exp["X_val"], all_exp["X_test"], all_exp["y_train"], all_exp["y_val"], all_exp["y_test"]), MODEL_DIR / "data_splits.joblib")
+    joblib.dump(all_exp["trained_models"], MODEL_DIR / "all_models.joblib")
 
-    print("\n" + "=" * 55)
-    print("TRENIRANJE MODELA")
-    print("=" * 55)
+    # Dodatni eksperiment: bez preostalih ekonomskih atributa (i euribor3m),
+    # da se kvantitativno potvrdi koliko ekonomska grupa doprinosi modelu.
+    all_features = list(all_exp["X_train"].columns)
+    no_economic_features = [c for c in all_features if c not in ECONOMIC_FEATURES]
+    no_econ_exp = run_experiment("without_economic_features", selected_features=no_economic_features)
 
-    trained_pipelines, val_results = train_and_validate(
-        X_train, X_val, y_train, y_val
-    )
+    comparison = pd.concat([all_exp["results_df"], no_econ_exp["results_df"]], ignore_index=True)
+    comparison.to_csv(RESULTS_DIR / "feature_group_experiment_comparison.csv", index=False)
+    print("\nPOREDJENJE EKSPERIMENATA: sa euribor3m vs bez svih ekonomskih atributa")
+    print(comparison.sort_values(by=["model", "experiment"]))
 
-    print_summary(val_results)
-    plot_comparison(val_results)
-
-    best_name = save_models(trained_pipelines, val_results)
-
-    # Cuvamo sve podatke za evaluaciju i hyperparameter tuning
-    joblib.dump(
-        (X_train, X_val, X_test, y_train, y_val, y_test),
-        MODEL_DIR / "data_splits.joblib"
-    )
-    joblib.dump(trained_pipelines, MODEL_DIR / "all_models.joblib")
-
-    results_df = pd.DataFrame(val_results).T
-    results_df.to_csv(RESULTS_DIR / "validation_results.csv")
-
-    print("\n" + "=" * 55)
-    print("TRENIRANJE ZAVRSENO")
-    print(f"Kada si zadovoljna rezultatima, pokreni model_evaluation.py")
-    print("=" * 55)
+    # Kao glavni model za nastavak cuvamo najbolji iz all_features eksperimenata.
+    save_best_model(all_exp["trained_models"], all_exp["results_df"], suffix="")

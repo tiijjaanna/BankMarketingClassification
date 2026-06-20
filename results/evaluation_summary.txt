@@ -1,0 +1,41 @@
+
+============================================================
+SAŽETAK EVALUACIJE
+============================================================
+
+🏆 Najbolji model (po F2, yes klasa, prag=0.5): Logistic Regression
+   - F2 (yes): 0.5736
+   - F1 (yes): 0.4570
+   - Recall: 0.6911
+   - Precision: 0.3414
+   - Accuracy: 0.8150
+   - ROC AUC: 0.8086
+   - PR AUC: 0.4441
+   - TP: 481, TN: 4553
+   - FP: 928, FN: 215
+
+📐 Nakon threshold tuninga (prag=0.52):
+   - F2: 0.5736 → 0.5768 (+0.0032)
+   - F1: 0.4570 → 0.4722
+   - Recall: 0.6911 → 0.6767
+   - Precision: 0.3414 → 0.3626
+
+📊 Poređenje sa baseline modelom:
+   - F2 (yes) poboljšanje: +0.4639
+   - PR-AUC poboljšanje: +0.3316
+   - ROC AUC poboljšanje: +0.3093
+
+💡 Zaključak:
+   Tema projekta je predikcija koliko ce klijenata prihvatiti ponudu banke,
+   pa se modeli rangiraju po F2 meri:
+   F2 = 5 * (Precision * Recall) / (4 * Precision + Recall)
+   F2 daje Recall-u 4x vecu tezinu nego Precision-u, jer se propusten
+   klijent koji bi se pretplatio (FN) smatra skupljom greskom od
+   suvisnog poziva (FP) - ali, za razliku od cistog Recall-a, F2 i dalje
+   donekle kaznjava modele sa veoma niskim Precision-om.
+   Model uspesno prepoznaje vecinu klijenata sklonih pretplati (visok Recall).
+   Niz uklonjenog 'duration' atributa (data leakage) i jako neuravnotezenih
+   klasa (~11% pozitivnih), ovo je ocekivan i objasnjiv rezultat za ovaj problem.
+
+📁 Detaljni rezultati sačuvani u: C:\Users\User1\PycharmProjects\BankMarketingClassification\results
+📊 Grafikoni sačuvani u: C:\Users\User1\PycharmProjects\BankMarketingClassification\results\figures

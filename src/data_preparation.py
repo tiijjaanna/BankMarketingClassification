@@ -1,7 +1,9 @@
 from pathlib import Path
 
-import numpy as np
+import joblib
 import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
@@ -10,163 +12,178 @@ MODEL_DIR = BASE_DIR / "models"
 RESULTS_DIR = BASE_DIR / "results"
 FIGURES_DIR = RESULTS_DIR / "figures"
 
-DURATION_COLUMN = "duration"
-TARGET_COLUMN = "y"
-
 MODEL_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+TARGET_COLUMN = "y"
+LEAKY_COLUMN = "duration"
+
+# unknown se tretira kao validna kategorija i ostaje u OneHotEncoder-u.
+CATEGORICAL_FEATURES = [
+    "job", "marital", "education", "default", "housing", "loan",
+    "contact", "month", "day_of_week", "poutcome",
+]
+
+# emp.var.rate i nr.employed su uklonjeni: jako su korelisani sa euribor3m
+# (r > 0.9 za oba), pa nose redundantnu informaciju. euribor3m je zadrzan
+# kao predstavnik ekonomske grupe atributa jer je najpoznatiji i
+# najinterpretabilniji u kontekstu bankarstva.
+NUMERIC_FEATURES = [
+    "age", "campaign", "pdays", "previous",
+    "cons.price.idx", "cons.conf.idx", "euribor3m",
+]
+
+# Originalna ekonomska grupa, ostavljena radi reference u eda.py
+# (correlation_analysis i economic_attributes_analysis se i dalje racunaju
+# na celoj grupi da bi se korelacija mogla prikazati i opravdati).
+ECONOMIC_FEATURES = [
+    "emp.var.rate", "cons.price.idx", "cons.conf.idx", "euribor3m", "nr.employed",
+]
+
+CLIENT_FEATURES = [
+    "age", "job", "marital", "education", "default", "housing", "loan",
+]
+
+CAMPAIGN_FEATURES = [
+    "contact", "month", "day_of_week", "campaign", "pdays", "previous", "poutcome",
+]
 
 
 def load_data(path=DATA_PATH) -> pd.DataFrame:
     print("Ucitavanje podataka")
     dataset = pd.read_csv(path, delimiter=";", encoding="utf-8")
-    print("Prvih nekoliko redova")
+    print("\nPrvih nekoliko redova")
     print(dataset.head())
     print("\nDimenzije skupa")
     print(dataset.shape)
     return dataset
 
 
-def handle_missing_values(dataset: pd.DataFrame) -> pd.DataFrame:
-    print("\nNedostajuce vrednosti pre ciscenja:")
+def initial_checks(dataset: pd.DataFrame) -> None:
+    print("\nNedostajuce vrednosti")
     print(dataset.isna().sum())
 
-    dataset = dataset.dropna()
-    dataset = dataset.drop(columns=[DURATION_COLUMN])
+    print("\nBroj 'unknown' vrednosti po kategorijskim atributima")
+    for col in CATEGORICAL_FEATURES:
+        n = (dataset[col] == "unknown").sum()
+        pct = n / len(dataset) * 100
+        print(f"{col}: {n} ({pct:.2f}%)")
 
-    print("\nNedostajuce vrednosti nakon ciscenja:")
-    print(dataset.isna().sum())
-
-    return dataset
+    print("\nNapomena: 'unknown' se tretira kao validna kategorija, ne kao anomalija.")
+    print("Razlog: stopa pretplate kod 'unknown' vrednosti (npr. kod default: ~5%)")
+    print("znacajno odstupa od 'no' (~13%), sto pokazuje da je 'unknown' informativna")
+    print("kategorija, a ne slucajno nedostajuci podatak koji treba nadoknaditi.")
 
 
 def remove_duplicates(dataset: pd.DataFrame) -> pd.DataFrame:
-    print("\nBroj duplikata:")
-    duplicate_sum = dataset.duplicated().sum()
-    print(duplicate_sum)
-
-    if duplicate_sum > 0:
-        print(f"\nPronadjeno duplikata: {duplicate_sum}")
-        dataset = dataset.drop_duplicates(keep="first")
-        print("Duplikati obrisani")
-
+    print("\nBroj duplikata pre ciscenja")
+    duplicate_count = dataset.duplicated().sum()
+    print(duplicate_count)
+    if duplicate_count > 0:
+        dataset = dataset.drop_duplicates().reset_index(drop=True)
+    print("\nBroj duplikata nakon ciscenja")
+    print(dataset.duplicated().sum())
     return dataset
 
 
-def check_distribution_or_target_column(dataset: pd.DataFrame):
-    print("\nDistribucija ciljne promenljive (y):")
-    print(dataset[TARGET_COLUMN].value_counts())
-    target_pct = dataset[TARGET_COLUMN].value_counts(normalize=True) * 100
-    print(f"\nDistribucija u procentima:\n{target_pct.round(2).to_string()}")
-
-
-def encoding(dataset: pd.DataFrame) -> pd.DataFrame:
-    dataset = encoding_education(dataset)
-    dataset = encode_binary_label(dataset)
-    dataset = one_hot_encoding(dataset)
-    dataset = encoding_cyclical(dataset)
+def remove_leaky_features(dataset: pd.DataFrame) -> pd.DataFrame:
+    if LEAKY_COLUMN in dataset.columns:
+        dataset = dataset.drop(columns=[LEAKY_COLUMN])
+        print(f"\nKolona '{LEAKY_COLUMN}' je uklonjena jer predstavlja leaky feature.")
+        print("Razlog: trajanje razgovora je poznato tek nakon poziva, ne pre donosenja odluke.")
     return dataset
 
 
-def encoding_education(dataset: pd.DataFrame) -> pd.DataFrame:
-    education_order = {
-        'illiterate': 0,
-        'basic.4y': 1,
-        'basic.6y': 2,
-        'basic.9y': 3,
-        'high.school': 4,
-        'professional.course': 5,
-        'university.degree': 6,
-        'unknown': 7,
-    }
-
-    dataset['education'] = dataset['education'].map(education_order)
-
-    missing_edu = dataset['education'].isna().sum()
-    print(f"[education] Ordinalno enkodiranje – nepokriventih vrednosti: {missing_edu}")
-    print(f"  Vrednosti posle enkodiranja: {sorted(dataset['education'].unique())}\n")
-
+def remove_redundant_economic_features(dataset: pd.DataFrame) -> pd.DataFrame:
+    """Uklanja emp.var.rate i nr.employed - jako korelisani sa euribor3m (r>0.9)."""
+    redundant = [c for c in ["emp.var.rate", "nr.employed"] if c in dataset.columns]
+    if redundant:
+        dataset = dataset.drop(columns=redundant)
+        print(f"\nKolone {redundant} su uklonjene zbog jake korelacije (r>0.9) sa euribor3m.")
+        print("euribor3m je zadrzan kao predstavnik ekonomske grupe atributa.")
     return dataset
 
 
-def encode_binary_label(dataset: pd.DataFrame) -> pd.DataFrame:
-    # default, housing, loan imaju 3 vrednosti: yes/no/unknown
-    three_val_map = {'no': 0, 'yes': 1, 'unknown': 2}
-
-    for col in ['default', 'housing', 'loan']:
-        dataset[col] = dataset[col].map(three_val_map)
-        print(f"[{col}] Label Encoding: no→0, yes→1, unknown→2 | "
-              f"Raspodela: {dataset[col].value_counts().to_dict()}")
-
-    contact_map = {'cellular': 1, 'telephone': 0}
-    dataset['contact'] = dataset['contact'].map(contact_map)
-    print(f"[contact] Label Encoding: telephone→0, cellular→1 | "
-          f"Raspodela: {dataset['contact'].value_counts().to_dict()}\n")
-
-    dataset['y'] = dataset['y'].map({'yes': 1, 'no': 0})
-    print(f"[y] Ciljna promenljiva: no→0, yes→1 | "
-          f"Raspodela: {dataset['y'].value_counts().to_dict()}\n")
-
-    return dataset
-
-
-def one_hot_encoding(dataset: pd.DataFrame) -> pd.DataFrame:
-    ohe_cols = ['job', 'marital', 'poutcome']
-    dataset = pd.get_dummies(dataset, columns=ohe_cols, drop_first=True, dtype=int)
-
-    new_ohe_cols = [c for c in dataset.columns
-                    if any(c.startswith(p + '_') for p in ohe_cols)]
-    print(f"[job, marital, poutcome] One-Hot Encoding")
-    print(f"  Novokreirane kolone ({len(new_ohe_cols)}): {new_ohe_cols}\n")
-
-    return dataset
-
-
-def encoding_cyclical(dataset: pd.DataFrame) -> pd.DataFrame:
-    month_map = {
-        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4,
-        'may': 5, 'jun': 6, 'jul': 7, 'aug': 8,
-        'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-    }
-
-    dataset['month_num'] = dataset['month'].map(month_map)
-    dataset['month_sin'] = np.sin(2 * np.pi * dataset['month_num'] / 12)
-    dataset['month_cos'] = np.cos(2 * np.pi * dataset['month_num'] / 12)
-    dataset = dataset.drop(columns=['month', 'month_num'])
-    print(f"[month] Ciklicno enkodiranje → month_sin, month_cos")
-
-    day_map = {'mon': 1, 'tue': 2, 'wed': 3, 'thu': 4, 'fri': 5}
-    dataset['day_num'] = dataset['day_of_week'].map(day_map)
-    dataset['day_sin'] = np.sin(2 * np.pi * dataset['day_num'] / 5)
-    dataset['day_cos'] = np.cos(2 * np.pi * dataset['day_num'] / 5)
-    dataset = dataset.drop(columns=['day_of_week', 'day_num'])
-    print(f"[day_of_week] Ciklicno enkodiranje → day_sin, day_cos\n")
-
-    return dataset
-
-
-def get_prepared_data(path=DATA_PATH):
-    """Pomocna funkcija – vraca X i y spremne za treniranje modela."""
+def prepare_dataframe(path=DATA_PATH) -> pd.DataFrame:
     dataset = load_data(path)
-    dataset = handle_missing_values(dataset)
+    initial_checks(dataset)
     dataset = remove_duplicates(dataset)
-    dataset = encoding(dataset)
+    dataset = remove_leaky_features(dataset)
+    return dataset
 
-    X = dataset.drop(columns=[TARGET_COLUMN])
-    y = dataset[TARGET_COLUMN]
-    return X, y
+
+def get_data_and_preprocessor(path=DATA_PATH, selected_features=None):
+    dataset = prepare_dataframe(path)
+    dataset = remove_redundant_economic_features(dataset)
+
+    if selected_features is None:
+        categorical_features = CATEGORICAL_FEATURES.copy()
+        numeric_features = NUMERIC_FEATURES.copy()
+    else:
+        categorical_features = [c for c in CATEGORICAL_FEATURES if c in selected_features]
+        numeric_features = [c for c in NUMERIC_FEATURES if c in selected_features]
+
+    X = dataset[categorical_features + numeric_features].copy()
+    y = dataset[TARGET_COLUMN].map({"no": 0, "yes": 1})
+
+    print("\nRaspodela ciljne promenljive")
+    print(y.value_counts())
+    print((y.value_counts(normalize=True) * 100).round(2))
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("categorical", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+            ("numeric", "passthrough", numeric_features),
+        ]
+    )
+
+    return X, y, preprocessor, categorical_features, numeric_features
+
+
+def demonstrate_preprocessing(X, preprocessor):
+    X_preprocessed = preprocessor.fit_transform(X)
+    print("\nOblik X pre preprocessing-a")
+    print(X.shape)
+    print("\nOblik X nakon preprocessing-a")
+    print(X_preprocessed.shape)
+    print("\nNovi atributi nakon enkodiranja")
+    print(preprocessor.get_feature_names_out())
+    joblib.dump(preprocessor, MODEL_DIR / "preprocessor.joblib")
+    print("\nPreprocessor sacuvan kao models/preprocessor.joblib")
+
+
+def get_feature_names(preprocessor):
+    """Dobijanje imena atributa nakon OneHotEncoder-a"""
+    return preprocessor.get_feature_names_out()
+
+
+def get_data_splits():
+    """Vraća podeljene podatke ako postoje, ili ih kreira"""
+    splits_path = MODEL_DIR / "data_splits.joblib"
+    if splits_path.exists():
+        print("Učitavanje postojećih podeljenih podataka...")
+        return joblib.load(splits_path)
+    else:
+        print("Kreiranje novih podeljenih podataka...")
+        from sklearn.model_selection import train_test_split
+        X, y, preprocessor, cat_features, num_features = get_data_and_preprocessor()
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            X, y, test_size=0.30, random_state=42, stratify=y
+        )
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=0.50, random_state=42, stratify=y_temp
+        )
+        splits = (X_train, X_val, X_test, y_train, y_val, y_test)
+        joblib.dump(splits, splits_path)
+        print("Podaci sačuvani u models/data_splits.joblib")
+        return splits
 
 
 if __name__ == "__main__":
-    dataset = load_data()
-    dataset = handle_missing_values(dataset)
-    dataset = remove_duplicates(dataset)
-    check_distribution_or_target_column(dataset)
-    dataset = encoding(dataset)
-
-    print(f"\nFinalni dataset: {dataset.shape[0]} redova x {dataset.shape[1]} kolona")
-    print(f"Ukupno NaN vrednosti: {dataset.isna().sum().sum()}")
-    print("\nKolone finalnog dataseta:")
-    print(list(dataset.columns))
-
+    X, y, preprocessor, categorical_features, numeric_features = get_data_and_preprocessor(DATA_PATH)
+    print("\nKategorijski atributi")
+    print(categorical_features)
+    print("\nNumericki atributi")
+    print(numeric_features)
+    demonstrate_preprocessing(X, preprocessor)

@@ -3,34 +3,19 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-from scipy import stats
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-
-DATA_PATH = BASE_DIR / "data" / "bank-additional-full.csv"
-RESULTS_DIR = BASE_DIR / "results"
-FIGURES_DIR = RESULTS_DIR / "figures"
+from data_preparation import (
+    DATA_PATH,
+    RESULTS_DIR,
+    FIGURES_DIR,
+    CATEGORICAL_FEATURES,
+    NUMERIC_FEATURES,
+    ECONOMIC_FEATURES,
+    prepare_dataframe,
+)
 
 RESULTS_DIR.mkdir(exist_ok=True)
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-
-num_cols = [
-    'age', 'campaign', 'pdays', 'previous',
-    'emp.var.rate', 'cons.price.idx', 'cons.conf.idx',
-    'euribor3m', 'nr.employed'
-]
-
-cat_cols = [
-    'job', 'marital', 'education', 'default',
-    'housing', 'loan', 'contact', 'month',
-    'day_of_week', 'poutcome'
-]
-
-
-def load_data(path=DATA_PATH) -> pd.DataFrame:
-    dataset = pd.read_csv(path, delimiter=";", encoding="utf-8")
-    print(f"Ucitan dataset: {dataset.shape[0]} redova x {dataset.shape[1]} kolona")
-    return dataset
 
 
 def basic_info(dataset: pd.DataFrame):
@@ -38,226 +23,341 @@ def basic_info(dataset: pd.DataFrame):
     print("OSNOVNE INFORMACIJE O DATASETU")
     print("=" * 60)
 
-    print("\nTipovi podataka:")
+    print("\nPrvih nekoliko redova")
+    print(dataset.head())
+
+    print("\nDimenzije skupa")
+    print(dataset.shape)
+
+    print("\nTipovi podataka")
     print(dataset.dtypes)
 
-    print("\nOpisna statistika – numericki atributi:")
-    print(dataset[num_cols].describe().round(2))
-
-    print("\nBroj jedinstvenih vrednosti po kategorickim atributima:")
-    for col in cat_cols:
-        print(f"  {col}: {sorted(dataset[col].unique())}")
+    print("\nOpisna statistika numerickih atributa")
+    numeric_existing = [col for col in NUMERIC_FEATURES if col in dataset.columns]
+    print(dataset[numeric_existing].describe().round(2))
 
 
-def check_missing_and_unknown(dataset: pd.DataFrame):
+def missing_and_unknown_analysis(dataset: pd.DataFrame):
     print("\n" + "=" * 60)
-    print("NEDOSTAJUCE VREDNOSTI I 'UNKNOWN'")
+    print("NEDOSTAJUCE VREDNOSTI I UNKNOWN")
     print("=" * 60)
 
-    print("\nBroj NaN vrednosti po koloni:")
+    print("\nNaN vrednosti")
     print(dataset.isna().sum())
 
-    print("\nBroj 'unknown' vrednosti po kategorickim kolonama:")
-    for col in cat_cols:
-        n = (dataset[col] == 'unknown').sum()
-        pct = n / len(dataset) * 100
-        print(f"  {col}: {n} ({pct:.1f}%)")
+    print("\nUnknown vrednosti po kategorijskim atributima")
+    for col in CATEGORICAL_FEATURES:
+        if col in dataset.columns:
+            count = (dataset[col] == "unknown").sum()
+            pct = count / len(dataset) * 100
+            print(f"{col}: {count} ({pct:.2f}%)")
+
+    print("\nZakljucak:")
+    print("Unknown se ne tretira kao anomalija, vec kao validna kategorijska vrednost.")
 
 
-def check_outliers(dataset: pd.DataFrame):
-    print("\n" + "=" * 60)
-    print("EKSTREMNE VREDNOSTI (OUTLIERI) – IQR METODA")
-    print("=" * 60)
-
-    # IQR metoda: vrednosti ispod Q1-1.5*IQR ili iznad Q3+1.5*IQR su outlieri
-    for col in num_cols:
-        Q1 = dataset[col].quantile(0.25)
-        Q3 = dataset[col].quantile(0.75)
-        IQR = Q3 - Q1
-        lower = Q1 - 1.5 * IQR
-        upper = Q3 + 1.5 * IQR
-        n_out = ((dataset[col] < lower) | (dataset[col] > upper)).sum()
-        pct = n_out / len(dataset) * 100
-        print(f"  {col}: {n_out} outliera ({pct:.1f}%) | opseg: [{lower:.2f}, {upper:.2f}]")
-
-    # Posebna napomena za pdays – vrednost 999 znaci "nije kontaktiran"
-    pdays_999 = (dataset['pdays'] == 999).sum()
-    print(f"\n  NAPOMENA – pdays=999: {pdays_999} redova ({pdays_999/len(dataset)*100:.1f}%)")
-    print("  Vrednost 999 nije pravi outlier – oznacava da klijent nije prethodno kontaktiran.")
-
-
-def check_correlations(dataset: pd.DataFrame):
-    print("\n" + "=" * 60)
-    print("KORELACIJE IZMEDJU NUMERICKIH ATRIBUTA")
-    print("=" * 60)
-
-    corr = dataset[num_cols].corr()
-
-    # Ispisujemo jake korelacije (|r| > 0.7), iskljucujuci dijagonalu
-    print("\nJake korelacije (|r| > 0.7):")
-    found = False
-    for i in range(len(num_cols)):
-        for j in range(i + 1, len(num_cols)):
-            r = corr.iloc[i, j]
-            if abs(r) > 0.7:
-                print(f"  {num_cols[i]} <-> {num_cols[j]}: r = {r:.3f}")
-                found = True
-    if not found:
-        print("  Nema jakih korelacija.")
-
-    # Korelacija numeričkih atributa sa ciljnom promenljivom
-    print("\nKorelacija numeričkih atributa sa ciljnom promenljivom (y):")
-    dataset_temp = dataset.copy()
-    dataset_temp['y_bin'] = (dataset_temp['y'] == 'yes').astype(int)
-    for col in num_cols:
-        r, p = stats.pointbiserialr(dataset_temp[col], dataset_temp['y_bin'])
-        print(f"  {col}: r = {r:.3f} (p = {p:.4f})")
-
-    # Heatmap korelacione matrice
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm',
-                center=0, square=True, linewidths=0.5)
-    plt.title('Korelaciona matrica – numericki atributi', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "correlation_heatmap.png", dpi=150)
-    plt.close()
-    print("\nSacuvano: correlation_heatmap.png")
-
-
-def plot_target_distribution(dataset: pd.DataFrame):
+def target_distribution(dataset: pd.DataFrame):
     print("\n" + "=" * 60)
     print("DISTRIBUCIJA CILJNE PROMENLJIVE")
     print("=" * 60)
 
-    counts = dataset['y'].value_counts()
-    pct = dataset['y'].value_counts(normalize=True) * 100
+    counts = dataset["y"].value_counts()
+    pct = dataset["y"].value_counts(normalize=True) * 100
+
     print(counts)
-    print(f"\nno:  {pct['no']:.1f}%")
-    print(f"yes: {pct['yes']:.1f}%")
-    print("\nNAPOMENA: Dataset je neuravnotezen – 'no' dominira.")
-    print("Ovo znaci da model moze biti pristrasan ka predikciji 'no'.")
-    print("Resenje: koristicemo SMOTE pri treniranju modela.")
+    print("\nProcenti")
+    print(pct.round(2))
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-
-    # Bar chart
-    axes[0].bar(counts.index, counts.values, color=['#2563EB', '#F59E0B'],
-                edgecolor='white', linewidth=1.5)
-    for i, (val, cnt) in enumerate(counts.items()):
-        axes[0].text(i, cnt + 200, f'{cnt:,}', ha='center',
-                     fontweight='bold', fontsize=10)
-    axes[0].set_title('Broj uzoraka po klasi')
-    axes[0].set_xlabel('Pretplata (y)')
-    axes[0].set_ylabel('Broj klijenata')
-
-    # Pie chart
-    axes[1].pie(counts.values, labels=counts.index, autopct='%1.1f%%',
-                colors=['#2563EB', '#F59E0B'], startangle=90)
-    axes[1].set_title('Procentualna raspodela klasa')
-
-    plt.suptitle('Distribucija ciljne promenljive (y)', fontsize=14, fontweight='bold')
+    plt.figure(figsize=(7, 5))
+    counts.plot(kind="bar")
+    plt.title("Distribucija ciljne promenljive")
+    plt.xlabel("y")
+    plt.ylabel("Broj klijenata")
     plt.tight_layout()
     plt.savefig(FIGURES_DIR / "target_distribution.png", dpi=150)
     plt.close()
-    print("Sacuvano: target_distribution.png")
 
 
-def plot_numeric_distributions(dataset: pd.DataFrame):
-    fig, axes = plt.subplots(3, 3, figsize=(15, 12))
-    axes = axes.flatten()
-
-    for i, col in enumerate(num_cols):
-        for val, color in zip(['no', 'yes'], ['#2563EB', '#F59E0B']):
-            axes[i].hist(dataset[dataset['y'] == val][col], bins=30,
-                         alpha=0.7, color=color, label=val,
-                         edgecolor='white', density=True)
-        axes[i].set_title(col, fontweight='bold')
-        axes[i].legend(fontsize=8)
-        axes[i].grid(alpha=0.3)
-
-    plt.suptitle('Distribucija numerickih atributa po ciljnoj promenljivoj',
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "numeric_distributions.png", dpi=150)
-    plt.close()
-    print("Sacuvano: numeric_distributions.png")
-
-
-def plot_categorical_vs_target(dataset: pd.DataFrame):
-    # Za svaki kategoricki atribut prikazujemo % 'yes' po kategoriji
-    fig, axes = plt.subplots(2, 5, figsize=(20, 8))
-    axes = axes.flatten()
-
-    for i, col in enumerate(cat_cols):
-        pct_yes = (dataset.groupby(col)['y']
-                   .apply(lambda x: (x == 'yes').sum() / len(x) * 100)
-                   .sort_values(ascending=False))
-
-        axes[i].bar(range(len(pct_yes)), pct_yes.values,
-                    color='#F59E0B', edgecolor='white')
-        axes[i].set_xticks(range(len(pct_yes)))
-        axes[i].set_xticklabels(pct_yes.index, rotation=45, ha='right', fontsize=7)
-        axes[i].set_title(f'{col}', fontweight='bold')
-        axes[i].set_ylabel('% yes')
-        axes[i].grid(axis='y', alpha=0.3)
-
-    plt.suptitle('Procenat pretplate (yes) po kategorickim atributima',
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "categorical_vs_target.png", dpi=150)
-    plt.close()
-    print("Sacuvano: categorical_vs_target.png")
-
-
-def plot_boxplots(dataset: pd.DataFrame):
-    # Boxplotovi pokazuju distribuciju i outlijere za svaki numericki atribut
-    fig, axes = plt.subplots(3, 3, figsize=(15, 12))
-    axes = axes.flatten()
-
-    for i, col in enumerate(num_cols):
-        data_no = dataset[dataset['y'] == 'no'][col]
-        data_yes = dataset[dataset['y'] == 'yes'][col]
-
-        axes[i].boxplot([data_no, data_yes], tick_labels=['no', 'yes'],
-                        patch_artist=True,
-                        boxprops=dict(facecolor='#EFF6FF'),
-                        medianprops=dict(color='#2563EB', linewidth=2))
-        axes[i].set_title(col, fontweight='bold')
-        axes[i].grid(axis='y', alpha=0.3)
-
-    plt.suptitle('Boxplot numerickih atributa po ciljnoj promenljivoj',
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "boxplots.png", dpi=150)
-    plt.close()
-    print("Sacuvano: boxplots.png")
-
-
-def crosstab_analysis(dataset: pd.DataFrame):
+def categorical_vs_target(dataset: pd.DataFrame):
     print("\n" + "=" * 60)
-    print("CROSSTAB ANALIZA – KATEGORICKI ATRIBUTI vs CILJNA PROMENLJIVA")
+    print("ODNOS KATEGORIJSKIH ATRIBUTA I CILJNE PROMENLJIVE")
     print("=" * 60)
 
-    for col in cat_cols:
-        print(f"\nAtribut: {col}")
-        ct = pd.crosstab(dataset[col], dataset['y'], normalize='index').round(3) * 100
-        ct.columns = ['% no', '% yes']
-        print(ct.sort_values('% yes', ascending=False).to_string())
+    for col in CATEGORICAL_FEATURES:
+        if col not in dataset.columns:
+            continue
+
+        print("\nAtribut:", col)
+        table = pd.crosstab(dataset[col], dataset["y"], normalize="index").round(3) * 100
+        print(table)
+
+        yes_rate = (
+            dataset.groupby(col)["y"]
+            .apply(lambda x: (x == "yes").mean() * 100)
+            .sort_values(ascending=False)
+        )
+
+        plt.figure(figsize=(9, 5))
+        yes_rate.plot(kind="bar")
+        plt.title(f"Procenat pretplate po atributu: {col}")
+        plt.xlabel(col)
+        plt.ylabel("% yes")
+        plt.xticks(rotation=45, ha="right")
+        plt.tight_layout()
+        plt.savefig(FIGURES_DIR / f"{col}_vs_target.png", dpi=150)
+        plt.close()
+
+
+def key_visualizations(dataset: pd.DataFrame):
+    """
+    Posebni grafici za atribute koji su najznacajniji za interpretaciju:
+    contact, education, campaign, poutcome, month.
+    Ovo direktno pokriva zahteve iz specifikacije projekta.
+    """
+    key_categorical = ["contact", "education", "poutcome", "month", "job"]
+
+    for col in key_categorical:
+        if col not in dataset.columns:
+            continue
+
+        yes_rate = (
+            dataset.groupby(col)["y"]
+            .apply(lambda x: (x == "yes").mean() * 100)
+            .sort_values(ascending=False)
+        )
+
+        plt.figure(figsize=(9, 5))
+        yes_rate.plot(kind="bar")
+        plt.title(f"Pretplata po atributu: {col}")
+        plt.xlabel(col)
+        plt.ylabel("% klijenata sa y=yes")
+        plt.xticks(rotation=45, ha="right")
+        plt.tight_layout()
+        plt.savefig(FIGURES_DIR / f"key_{col}_subscription_rate.png", dpi=150)
+        plt.close()
+
+    # campaign je numericki atribut, pa ga prikazujemo posebno.
+    if "campaign" in dataset.columns:
+        campaign_rate = (
+            dataset.groupby("campaign")["y"]
+            .apply(lambda x: (x == "yes").mean() * 100)
+        )
+
+        # Zbog ekstremnih vrednosti prikazujemo prvih 15 vrednosti kampanje.
+        campaign_rate = campaign_rate[campaign_rate.index <= 15]
+
+        plt.figure(figsize=(9, 5))
+        campaign_rate.plot(kind="bar")
+        plt.title("Pretplata po broju kontakata u kampanji")
+        plt.xlabel("campaign")
+        plt.ylabel("% yes")
+        plt.tight_layout()
+        plt.savefig(FIGURES_DIR / "key_campaign_subscription_rate.png", dpi=150)
+        plt.close()
+
+
+def numeric_vs_target(dataset: pd.DataFrame):
+    print("\n" + "=" * 60)
+    print("NUMERICKI ATRIBUTI I CILJNA PROMENLJIVA")
+    print("=" * 60)
+
+    numeric_existing = [col for col in NUMERIC_FEATURES if col in dataset.columns]
+
+    for col in numeric_existing:
+        print("\nAtribut:", col)
+        print(dataset.groupby("y")[col].describe().round(2))
+
+    # Boxplotovi za numericke atribute
+    rows = 3
+    cols = 3
+    fig, axes = plt.subplots(rows, cols, figsize=(15, 12))
+    axes = axes.flatten()
+
+    for i, col in enumerate(numeric_existing):
+        sns.boxplot(data=dataset, x="y", y=col, ax=axes[i])
+        axes[i].set_title(col)
+
+    for j in range(len(numeric_existing), len(axes)):
+        axes[j].axis("off")
+
+    plt.suptitle("Numericki atributi po ciljnoj promenljivoj", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / "numeric_boxplots_by_target.png", dpi=150)
+    plt.close()
+
+
+def correlation_analysis(dataset: pd.DataFrame):
+    print("\n" + "=" * 60)
+    print("KORELACIONA ANALIZA NUMERICKIH ATRIBUTA")
+    print("=" * 60)
+
+    numeric_existing = [col for col in NUMERIC_FEATURES if col in dataset.columns]
+
+    corr = dataset[numeric_existing].corr()
+
+    print("\nKorelaciona matrica")
+    print(corr.round(3))
+
+    print("\nJake korelacije |r| > 0.7")
+    found = False
+    for i in range(len(numeric_existing)):
+        for j in range(i + 1, len(numeric_existing)):
+            r = corr.iloc[i, j]
+            if abs(r) > 0.7:
+                print(f"{numeric_existing[i]} <-> {numeric_existing[j]}: {r:.3f}")
+                found = True
+
+    if not found:
+        print("Nema jakih korelacija.")
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(corr, annot=True, cmap="coolwarm", center=0, fmt=".2f")
+    plt.title("Korelaciona matrica numerickih atributa")
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / "correlation_heatmap.png", dpi=150)
+    plt.close()
+
+
+def economic_attributes_analysis(dataset: pd.DataFrame):
+    print("\n" + "=" * 60)
+    print("POSEBNA ANALIZA EKONOMSKIH ATRIBUTA")
+    print("=" * 60)
+
+    existing_economic = [col for col in ECONOMIC_FEATURES if col in dataset.columns]
+
+    print("\nEkonomski atributi:")
+    print(existing_economic)
+
+    print("\nOpis po ciljnoj promenljivoj")
+    for col in existing_economic:
+        print("\nAtribut:", col)
+        print(dataset.groupby("y")[col].describe().round(3))
+
+    # Boxplot ekonomskih atributa po y
+    fig, axes = plt.subplots(1, len(existing_economic), figsize=(4 * len(existing_economic), 5))
+
+    if len(existing_economic) == 1:
+        axes = [axes]
+
+    for ax, col in zip(axes, existing_economic):
+        sns.boxplot(data=dataset, x="y", y=col, ax=ax)
+        ax.set_title(col)
+
+    plt.suptitle("Ekonomski atributi po ciljnoj promenljivoj")
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / "economic_features_by_target.png", dpi=150)
+    plt.close()
+
+    # Korelacija samo ekonomskih atributa
+    econ_corr = dataset[existing_economic].corr()
+
+    plt.figure(figsize=(7, 6))
+    sns.heatmap(econ_corr, annot=True, cmap="coolwarm", center=0, fmt=".2f")
+    plt.title("Korelacija ekonomskih atributa")
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / "economic_correlation_heatmap.png", dpi=150)
+    plt.close()
+
+    print("\nNapomena:")
+    print(
+        "Ako su ekonomski atributi jako korelisani, model moze koristiti samo jedan od njih kao predstavnika cele grupe.")
+    print("Zato se njihov znacaj dodatno proverava eksperimentom sa i bez ekonomskih atributa u model_training.py.")
+
+
+def outlier_analysis(dataset: pd.DataFrame):
+    print("\n" + "=" * 60)
+    print("ANALIZA EKSTREMNIH VREDNOSTI")
+    print("=" * 60)
+
+    numeric_existing = [col for col in NUMERIC_FEATURES if col in dataset.columns]
+
+    for col in numeric_existing:
+        q1 = dataset[col].quantile(0.25)
+        q3 = dataset[col].quantile(0.75)
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+
+        outliers = ((dataset[col] < lower) | (dataset[col] > upper)).sum()
+        pct = outliers / len(dataset) * 100
+
+        print(f"{col}: {outliers} outliera ({pct:.2f}%)")
+
+    if "pdays" in dataset.columns:
+        n_999 = (dataset["pdays"] == 999).sum()
+        pct_999 = n_999 / len(dataset) * 100
+        print(f"\npdays=999: {n_999} ({pct_999:.2f}%)")
+        print("pdays=999 nije anomalija, vec oznacava da klijent nije prethodno kontaktiran.")
+
+
+def duration_note(original_path=DATA_PATH):
+    original = pd.read_csv(original_path, delimiter=";", encoding="utf-8")
+
+    print("\n" + "=" * 60)
+    print("NAPOMENA O ATRIBUTU duration")
+    print("=" * 60)
+
+    if "duration" in original.columns:
+        print("Atribut duration postoji u originalnom datasetu.")
+        print("On se uklanja pre treniranja jer je poznat tek nakon telefonskog razgovora.")
+        print("Ukljucivanje duration atributa dovelo bi do nerealno visokih rezultata modela.")
+
+        print("\nOpis duration atributa po ciljnoj promenljivoj")
+        print(original.groupby("y")["duration"].describe().round(2))
+
+
+def generate_eda_report(dataset: pd.DataFrame):
+    """Generisanje sažetog izveštaja iz EDA"""
+    print("\n" + "=" * 60)
+    print("EDA IZVEŠTAJ - SAŽETAK")
+    print("=" * 60)
+
+    total = len(dataset)
+    yes_count = dataset['y'].value_counts().get('yes', 0)
+    no_count = dataset['y'].value_counts().get('no', 0)
+
+    print(f"\n1. Ukupan broj klijenata: {total}")
+    print(f"   - Pretplatilo depozit: {yes_count} ({yes_count / total * 100:.2f}%)")
+    print(f"   - Nije pretplatilo: {no_count} ({no_count / total * 100:.2f}%)")
+    print(f"   - Odnos: 1:{no_count / yes_count:.1f} (neuravnotežen)")
+
+    print("\n2. Kategorijski atributi sa najvećom stopom pretplate:")
+    for col in ['poutcome', 'contact', 'education', 'job']:
+        if col in dataset.columns:
+            top = dataset.groupby(col)['y'].apply(lambda x: (x == 'yes').mean() * 100).sort_values(ascending=False)
+            print(f"   - {col}: {top.iloc[0]:.1f}% ({top.index[0]})")
+
+    print("\n3. Numerički atributi - proseci po pretplati:")
+    for col in ['age', 'campaign', 'previous']:
+        if col in dataset.columns:
+            yes_mean = dataset[dataset['y'] == 'yes'][col].mean()
+            no_mean = dataset[dataset['y'] == 'no'][col].mean()
+            print(f"   - {col}: yes={yes_mean:.1f}, no={no_mean:.1f}")
+
+    print("\n4. Uočene anomalije:")
+    print("   - pdays=999 označava odsustvo prethodnog kontakta (nije anomalija)")
+    print("   - 'unknown' vrednosti su validne kategorije")
+    print("   - duration je uklonjen kao leaky feature")
 
 
 if __name__ == "__main__":
-    dataset = load_data()
+    # prepare_dataframe ucitava podatke, proverava missing/unknown,
+    # uklanja duplikate i uklanja duration.
+    dataset = prepare_dataframe(DATA_PATH)
+
     basic_info(dataset)
-    check_missing_and_unknown(dataset)
-    check_outliers(dataset)
-    check_correlations(dataset)
-    plot_target_distribution(dataset)
-    plot_numeric_distributions(dataset)
-    plot_categorical_vs_target(dataset)
-    plot_boxplots(dataset)
-    crosstab_analysis(dataset)
+    missing_and_unknown_analysis(dataset)
+    target_distribution(dataset)
+    categorical_vs_target(dataset)
+    key_visualizations(dataset)
+    numeric_vs_target(dataset)
+    correlation_analysis(dataset)
+    economic_attributes_analysis(dataset)
+    outlier_analysis(dataset)
+    duration_note(DATA_PATH)
+    generate_eda_report(dataset)
 
     print("\n" + "=" * 60)
     print("EDA ZAVRSENA")
-    print(f"Grafici sacuvani u: {FIGURES_DIR}")
+    print("Grafici su sacuvani u folderu:", FIGURES_DIR)
     print("=" * 60)
