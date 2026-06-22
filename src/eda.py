@@ -284,10 +284,10 @@ def outlier_analysis(dataset: pd.DataFrame):
         print(f"{col}: {outliers} outliera ({pct:.2f}%)")
 
     if "pdays" in dataset.columns:
-        n_999 = (dataset["pdays"] == 999).sum()
-        pct_999 = n_999 / len(dataset) * 100
-        print(f"\npdays=999: {n_999} ({pct_999:.2f}%)")
-        print("pdays=999 nije anomalija, vec oznacava da klijent nije prethodno kontaktiran.")
+        n_minus1 = (dataset["pdays"] == -1).sum()
+        pct_minus1 = n_minus1 / len(dataset) * 100
+        print(f"\npdays=-1: {n_minus1} ({pct_minus1:.2f}%)")
+        print("pdays=-1 oznacava da klijent nije prethodno kontaktiran (originalna vrednost 999 konvertovana u -1).")
 
 
 def duration_note(original_path=DATA_PATH):
@@ -335,7 +335,7 @@ def generate_eda_report(dataset: pd.DataFrame):
             print(f"   - {col}: yes={yes_mean:.1f}, no={no_mean:.1f}")
 
     print("\n4. Uočene anomalije:")
-    print("   - pdays=999 označava odsustvo prethodnog kontakta (nije anomalija)")
+    print("   - pdays=-1 označava odsustvo prethodnog kontakta (konvertovano iz 999)")
     print("   - 'unknown' vrednosti su validne kategorije")
     print("   - duration je uklonjen kao leaky feature")
 

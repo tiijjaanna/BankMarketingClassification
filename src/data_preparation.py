@@ -94,6 +94,11 @@ def remove_leaky_features(dataset: pd.DataFrame) -> pd.DataFrame:
         print("Razlog: trajanje razgovora je poznato tek nakon poziva, ne pre donosenja odluke.")
     return dataset
 
+def convert_pdays(dataset: pd.DataFrame) -> pd.DataFrame:
+    """Konvertuje pdays=999 u -1 (označava odsustvo prethodnog kontakta)."""
+    if "pdays" in dataset.columns:
+        dataset["pdays"] = dataset["pdays"].replace(999, -1)
+    return dataset
 
 def remove_redundant_economic_features(dataset: pd.DataFrame) -> pd.DataFrame:
     """Uklanja emp.var.rate i nr.employed - jako korelisani sa euribor3m (r>0.9)."""
@@ -110,6 +115,7 @@ def prepare_dataframe(path=DATA_PATH) -> pd.DataFrame:
     initial_checks(dataset)
     dataset = remove_duplicates(dataset)
     dataset = remove_leaky_features(dataset)
+    dataset = convert_pdays(dataset)  
     return dataset
 
 
