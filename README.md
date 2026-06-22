@@ -12,6 +12,8 @@ Cilj je izgraditi modele mašinskog učenja koji maksimizuju **F2 skor** — met
 BankMarketingClassification/
 ├── data/
 │   └── bank-additional-full.csv      # Sirovi dataset (41.188 uzoraka)
+├── dokumentacija/
+│   └── BankMarketingClassification - Tijana Marković.pdf  # Projektni izveštaj
 ├── src/
 │   ├── data_preparation.py           # Učitavanje, čišćenje, preprocessing, split
 │   ├── eda.py                        # Eksplorativna analiza podataka
@@ -119,30 +121,33 @@ pip install pandas numpy scikit-learn imbalanced-learn matplotlib seaborn joblib
 ### Redosled izvršavanja
 
 ```bash
-# 1. Eksplorativna analiza (generiše results/figures/EDA grafikone)
+# 1. Priprema podataka (generiše models/preprocessor.joblib)
+python src/data_preparation.py
+
+# 2. Eksplorativna analiza (generiše results/figures/EDA grafikone)
 python src/eda.py
 
-# 2. Treniranje modela — untuned, oba eksperimenta
+# 3. Treniranje modela — untuned, oba eksperimenta
 #    Generiše: models/data_splits.joblib, models/best_model.joblib,
 #              results/all_features_validation_results.csv
 python src/model_training.py
 
-# 3. Hyperparameter tuning (GridSearchCV — može trajati nekoliko minuta)
+# 4. Hyperparameter tuning (GridSearchCV — može trajati nekoliko minuta)
 #    Generiše: models/best_tuned_model.joblib,
 #              results/tuned_validation_results.csv
 python src/hyperparameter_tunning.py
 
-# 4. Evaluacija na test skupu
+# 5. Evaluacija na test skupu
 #    Generiše: results/test_results.csv, results/threshold_tuning_results.csv,
 #              results/evaluation_summary.txt, results/figures/...
 python src/model_evaluation.py
 
-# 5. Feature selection analiza
+# 6. Feature selection analiza
 #    Generiše: results/feature_importance.csv,
 #              results/feature_selection_comparison.csv
 python src/feature_selection.py
 
-# 6. Pokretanje Streamlit UI-ja
+# 7. Pokretanje Streamlit UI-ja
 streamlit run app.py
 ```
 
