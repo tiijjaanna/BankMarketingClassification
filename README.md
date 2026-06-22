@@ -11,7 +11,8 @@ Cilj je izgraditi modele mašinskog učenja koji maksimizuju **F2 skor** — met
 ```
 BankMarketingClassification/
 ├── data/
-│   └── bank-additional-full.csv      # Sirovi dataset (41.188 uzoraka)
+│   ├── bank-additional-full.csv      # Sirovi dataset (41.188 uzoraka)
+│   └── BankMarketingClassification   # Opis i kontekst projekta
 ├── dokumentacija/
 │   └── BankMarketingClassification - Tijana Marković.pdf  # Projektni izveštaj
 ├── src/
