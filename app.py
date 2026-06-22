@@ -38,7 +38,7 @@ with st.sidebar:
         "promotivnih karakteristika."
     )
     st.write("**Dataset:** Bank Marketing (UCI), 41 188 klijenata.")
-    st.write("**Modeli:** Logistic Regression, Decision Tree, Random Forest, Gradient Boosting.")
+    st.write("**Najbolji model:** Logistic Regression.")
 
 
 # ── Input widgeti ─────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ if st.button("🔍 Predict", use_container_width=True):
         st.error(f"❌ **Klijent se verovatno neće pretplatiti** (verovatnoća: {probability * 100:.1f}%)")
 
     st.progress(float(probability))
-    st.caption(f"Verovatnoća pretplate: {probability * 100:.1f}% | Prag odluke: 0.52")
+    st.caption(f"Verovatnoća pretplate: {probability * 100:.1f}%")
 
     col_a, col_b = st.columns(2)
     with col_a:

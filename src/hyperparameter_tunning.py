@@ -216,7 +216,6 @@ def save_tuned_models(tuned_models, results_df):
     best_model = tuned_models[best_name]
 
     joblib.dump(best_model, MODEL_DIR / "best_tuned_model.joblib")
-    joblib.dump(best_model, MODEL_DIR / "final_model.joblib")
     (MODEL_DIR / "best_tuned_model_name.txt").write_text(best_name, encoding="utf-8")
 
     print("\n" + "=" * 60)
@@ -229,7 +228,7 @@ def save_tuned_models(tuned_models, results_df):
     print("Validation Precision:", round(best_row["val_precision"], 4))
     if best_row["val_precision"] < MIN_ACCEPTABLE_PRECISION:
         print(f"⚠️  UPOZORENJE: izabrani model ima Precision ispod {MIN_ACCEPTABLE_PRECISION}.")
-    print("Sacuvan kao models/best_tuned_model.joblib i models/final_model.joblib")
+    print("Sacuvan kao models/best_tuned_model.joblib")
 
 
 def plot_tuning_results(results_df):

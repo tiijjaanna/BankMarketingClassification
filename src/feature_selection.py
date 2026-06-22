@@ -27,7 +27,7 @@ def load_best_model():
     model_paths = [
         MODEL_DIR / "best_tuned_model.joblib",
         MODEL_DIR / "best_model.joblib",
-        MODEL_DIR / "final_model.joblib",
+       
     ]
     for path in model_paths:
         if path.exists():
