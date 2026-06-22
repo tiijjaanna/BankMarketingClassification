@@ -1,0 +1,5 @@
+accuracy,precision,recall,f1_yes,f2_yes,roc_auc,pr_auc,label,n_features,features,model
+0.8871620527764287,0.4993514915693904,0.5531609195402298,0.5248807089297887,0.5414908579465542,0.7826681042346916,0.4218470177522779,Svi atributi,17,"job, marital, education, default, housing, loan, contact, month, day_of_week, poutcome, age, campaign, pdays, previous, cons.price.idx, cons.conf.idx, euribor3m",Decision Tree
+0.8261291889266634,0.35257410296411856,0.6494252873563219,0.4570273003033367,0.5558288243974422,0.8097783460942399,0.4312361424760561,Top 5,5,"contact, month, day_of_week, poutcome, euribor3m",Decision Tree
+0.8633640926015865,0.42386831275720166,0.5919540229885057,0.4940047961630695,0.5484558040468583,0.8080965959731319,0.43571061335438743,Top 10,10,"job, education, contact, month, day_of_week, poutcome, campaign, pdays, previous, euribor3m",Decision Tree
+0.8531649668123684,0.39626352015732547,0.5790229885057471,0.4705195563339171,0.530123651670613,0.7751337168945175,0.38533408670434605,Top 15,15,"job, marital, education, default, housing, loan, contact, month, day_of_week, poutcome, age, campaign, pdays, previous, euribor3m",Decision Tree
